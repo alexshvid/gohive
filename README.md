@@ -127,7 +127,8 @@ var i *int32 = new(int32)
 cursor.FetchOne(context.Background(), &i)
 ```
 Alternatively, using the rowmap API, `m := cursor.RowMap(context.Background())`,
- `m` would be `map[string]interface{}{"table_name.column_name": nil}` for a `NULL` value.
+ `m` would be `map[string]interface{}{"table_name.column_name": nil}` for a `NULL` value. It will return a map
+where the keys are `table_name.column_name`. This works fine with hive but using spark `table_name` is not present and the keys are `column_name` and it can [lead to problems](https://github.com/beltran/gohive/issues/120) if two tables have the same column name.
 
 ## Running tests
 Tests can be run with:
