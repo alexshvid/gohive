@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/beltran/gosasl"
@@ -56,11 +57,18 @@ func NewTSaslTransport(trans thrift.TTransport, host string, mechanismName strin
 	}
 	client := gosasl.NewSaslClient(host, mechanism)
 
+	var fml uint64 = DEFAULT_MAX_LENGTH
+	if s, ok := configuration["frame_max_length"]; ok {
+		if s != "" {
+			fml, _ = strconv.ParseUint(s, 10, 32)
+		}
+	}
+
 	return &TSaslTransport{
 		saslClient:     client,
 		tp:             trans,
 		mechanism:      mechanismName,
-		maxLength:      DEFAULT_MAX_LENGTH,
+		maxLength:      uint32(fml),
 		principal:      configuration["principal"],
 		OpeningContext: context.Background(),
 	}, nil

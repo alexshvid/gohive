@@ -5,20 +5,19 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"github.com/pkg/errors"
 	"go.uber.org/atomic"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"os/user"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-	"log"
-	"github.com/pkg/errors"
 
-	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/alexshvid/gohive/hiveserver"
+	"github.com/apache/thrift/lib/go/thrift"
 	"github.com/beltran/gosasl"
 	"github.com/go-zookeeper/zk"
 )
@@ -57,6 +56,7 @@ type ConnectConfiguration struct {
 	TLSConfig            *tls.Config
 	ZookeeperNamespace   string
 	Database             string
+	FrameMaxLength       string
 }
 
 // NewConnectConfiguration returns a connect configuration, all with empty fields
@@ -244,7 +244,11 @@ func innerConnect(host string, port int, auth string,
 				return nil, fmt.Errorf("BufferedTransport was nil")
 			}
 		} else if auth == "NONE" || auth == "LDAP" || auth == "CUSTOM" {
-			saslConfiguration := map[string]string{"username": configuration.Username, "password": configuration.Password}
+			saslConfiguration := map[string]string{
+				"username": configuration.Username,
+				"password": configuration.Password,
+				"frame_max_length": configuration.FrameMaxLength,
+			}
 			transport, err = NewTSaslTransport(socket, host, "PLAIN", saslConfiguration)
 			if err != nil {
 				return
@@ -382,16 +386,14 @@ func (c *Cursor) WaitForCompletion(ctx context.Context) {
 	done := make(chan interface{}, 1)
 	defer close(done)
 
-	var mux sync.Mutex
-	var contextDone bool = false
+	var contextDone atomic.Bool
+	contextDone.Store(false)
 
 	go func() {
 		select {
 		case <-done:
 		case <-ctx.Done():
-			mux.Lock()
-			contextDone = true
-			mux.Unlock()
+			contextDone.Store(true)
 		}
 	}()
 
@@ -423,14 +425,11 @@ func (c *Cursor) WaitForCompletion(ctx context.Context) {
 			return
 		}
 		time.Sleep(time.Duration(time.Duration(c.conn.configuration.PollIntervalInMillis)) * time.Millisecond)
-		mux.Lock()
-		if contextDone {
+		if contextDone.Load() {
 			c.Err = fmt.Errorf("Context was done before the query was executed")
 			c.state = _CONTEXT_DONE
-			mux.Unlock()
 			return
 		}
-		mux.Unlock()
 	}
 	done <- nil
 }
