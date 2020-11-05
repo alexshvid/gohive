@@ -1070,7 +1070,6 @@ struct TGetOperationStatusResp {
 
   10: optional TProgressUpdateResp progressUpdateResponse
 
-  11: optional i64 numModifiedRows
 }
 
 

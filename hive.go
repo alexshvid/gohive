@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"go.uber.org/atomic"
 	"math/rand"
 	"net/http"
 	"net/url"
@@ -14,14 +15,15 @@ import (
 	"sync"
 	"time"
 	"log"
+	"github.com/pkg/errors"
 
 	"github.com/apache/thrift/lib/go/thrift"
-	"github.com/beltran/gohive/hiveserver"
+	"github.com/alexshvid/gohive/hiveserver"
 	"github.com/beltran/gosasl"
 	"github.com/go-zookeeper/zk"
 )
 
-const DEFAULT_FETCH_SIZE int64 = 1000
+const DEFAULT_FETCH_SIZE int64 = 1024
 const ZOOKEEPER_DEFAULT_NAMESPACE = "hiveserver2"
 
 // Connection holds the information for getting a cursor to hive
@@ -83,6 +85,7 @@ func ConnectZookeeper(hosts string, auth string,
 	if err != nil {
 		return nil, err
 	}
+	defer zkConn.Close()
 
 	hsInfos, _, err := zkConn.Children("/" + configuration.ZookeeperNamespace)
 	if err != nil {
@@ -165,11 +168,11 @@ func innerConnect(host string, port int, auth string,
 	}
 
 	if err != nil {
-		return
+		return nil, err
 	}
 
 	if err = socket.Open(); err != nil {
-		return
+		return nil, err
 	}
 
 	var transport thrift.TTransport
@@ -921,37 +924,33 @@ func (c *Cursor) Error() error {
 
 func (c *Cursor) pollUntilData(ctx context.Context, n int) (err error) {
 	rowsAvailable := make(chan error)
-	var stopLock sync.Mutex
-	var done = false
+	var done atomic.Bool
+	done.Store(false)
 	go func() {
 		defer close(rowsAvailable)
 		for true {
-			stopLock.Lock()
-			if done {
-				stopLock.Unlock()
+			if done.Load() {
 				rowsAvailable <- nil
 				return
 			}
-			stopLock.Unlock()
-
 			fetchRequest := hiveserver.NewTFetchResultsReq()
 			fetchRequest.OperationHandle = c.operationHandle
 			fetchRequest.Orientation = hiveserver.TFetchOrientation_FETCH_NEXT
 			fetchRequest.MaxRows = c.conn.configuration.FetchSize
 			responseFetch, err := c.conn.client.FetchResults(context.Background(), fetchRequest)
 			if err != nil {
-				rowsAvailable <- err
+				rowsAvailable <- errors.Errorf("gohive fetch results, %v", err)
 				return
 			}
 			c.response = responseFetch
 
 			if responseFetch.Status.StatusCode != hiveserver.TStatusCode_SUCCESS_STATUS {
-				rowsAvailable <- fmt.Errorf(responseFetch.Status.String())
+				rowsAvailable <- errors.Errorf("gohive fetch error, %s", responseFetch.Status.String())
 				return
 			}
 			err = c.parseResults(responseFetch)
 			if err != nil {
-				rowsAvailable <- err
+				rowsAvailable <- errors.Errorf("gohive parse results, %v", err)
 				return
 			}
 
@@ -966,14 +965,10 @@ func (c *Cursor) pollUntilData(ctx context.Context, n int) (err error) {
 	select {
 	case err = <-rowsAvailable:
 	case <-ctx.Done():
-		stopLock.Lock()
-		done = true
-		stopLock.Unlock()
-		select {
+		done.Store(true)
 		// Wait for goroutine to finish
-		case <-rowsAvailable:
-		}
-		err = fmt.Errorf("Context is done")
+		<-rowsAvailable
+		err = errors.New("Context is done")
 	}
 
 	if err != nil {
@@ -981,7 +976,7 @@ func (c *Cursor) pollUntilData(ctx context.Context, n int) (err error) {
 	}
 
 	if len(c.queue) < n {
-		return fmt.Errorf("Only %d rows where received", len(c.queue))
+		return errors.Errorf("Only %d rows where received", len(c.queue))
 	}
 	return nil
 }
